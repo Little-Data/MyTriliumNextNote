@@ -138,7 +138,14 @@ jobs:
           mkdir -p "$OUT_DIR"
           unzip -q -o /tmp/site.zip -d "$OUT_DIR"
           touch "$OUT_DIR/.nojekyll"
-          [ -d site-assets ] && cp -r site-assets/. "$OUT_DIR"/ || true
+
+          # 用 site-assets 强制覆盖导出的文件
+          if [ -d site-assets ]; then
+            echo "→ 用 site-assets 覆盖 $OUT_DIR"
+            cp -rfT site-assets/ "$OUT_DIR"/
+            echo "覆盖完成"
+          fi
+
           test -f "$OUT_DIR/index.html" || { echo "::error::导出结果无 index.html"; find "$OUT_DIR" -maxdepth 2 | head -40; exit 1; }
           echo "生成页面数: $(find "$OUT_DIR" -name '*.html' | wc -l)"
 
