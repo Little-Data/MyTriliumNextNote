@@ -12,7 +12,7 @@ on:
     inputs:
       root_note_id:
         description: '导出根笔记 ID（root = 整棵树；也可填某个子树 noteId 只发布该分支）'
-        default: 'root'
+        default: '1dMiMZa4sg4J'
       image:
         description: 'Trilium 服务端镜像，版本必须 >= 本地 Trilium 版本'
         default: 'triliumnext/trilium:v0.106.0'
