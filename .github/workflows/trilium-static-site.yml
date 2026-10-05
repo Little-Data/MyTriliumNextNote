@@ -27,8 +27,6 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  TRILIUM_IMAGE: ${{ inputs.image || 'triliumnext/trilium:v0.106.0' }}
-  ROOT_NOTE_ID: ${{ inputs.root_note_id || 'root' }}
   TRILIUM_PORT: '8080'
   OUT_DIR: public
 
@@ -39,7 +37,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
-          lfs: true # document.db 用 Git LFS 存时必须开启
+          lfs: true
+
+      - name: 解析输入参数
+        id: params
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # 手动触发：用 inputs，没填才 fallback
+            IMAGE="${{ inputs.image }}"
+            [ -z "$IMAGE" ] && IMAGE="triliumnext/trilium:v0.106.0"
+            ROOT_ID="${{ inputs.root_note_id }}"
+            [ -z "$ROOT_ID" ] && ROOT_ID="root"
+          else
+            # push 触发：用固定默认值
+            IMAGE="triliumnext/trilium:v0.106.0"
+            ROOT_ID="root"
+          fi
+          echo "TRILIUM_IMAGE=$IMAGE" >> "$GITHUB_ENV"
+          echo "ROOT_NOTE_ID=$ROOT_ID" >> "$GITHUB_ENV"
+          echo "→ TRILIUM_IMAGE=$IMAGE"
+          echo "→ ROOT_NOTE_ID=$ROOT_ID"
 
       - name: 校验输入
         env:
@@ -47,8 +65,10 @@ jobs:
         run: |
           set -euo pipefail
           [ -f trilium-data/document.db ] || { echo "::error::缺少 trilium-data/document.db"; exit 1; }
-          [ -n "$TRILIUM_PASSWORD" ] || { echo "::error::请配置 secrets中的TRILIUM_PASSWORD（Trilium 文档密码）；数据库未设密码时先在桌面端设置密码再重新上传"; exit 1; }
+          [ -n "$TRILIUM_PASSWORD" ] || { echo "::error::请配置 secrets.TRILIUM_PASSWORD"; exit 1; }
           ls -lh trilium-data/document.db
+          echo "使用镜像: $TRILIUM_IMAGE"
+          echo "导出根笔记: $ROOT_NOTE_ID"
 
       - name: 准备数据目录
         run: |
@@ -56,7 +76,6 @@ jobs:
           DATA_DIR="$RUNNER_TEMP/trilium-data"
           mkdir -p "$DATA_DIR"
           cp trilium-data/document.db "$DATA_DIR/document.db"
-          # 容器内以 uid 1000(node) 运行，宿主目录必须对 other 可写，否则 migration 会失败
           chmod -R 0777 "$DATA_DIR"
           echo "DATA_DIR=$DATA_DIR" >> "$GITHUB_ENV"
 
@@ -101,7 +120,7 @@ jobs:
         run: |
           set -euo pipefail
           url="http://127.0.0.1:${TRILIUM_PORT}"
-          # v0.106.0 导出路由注册为 GET，用 POST 会直接 404
+          echo "→ 导出笔记: $ROOT_NOTE_ID (image: $TRILIUM_IMAGE)"
           code=$(curl -sS -m 600 -X GET \
             "$url/etapi/notes/${ROOT_NOTE_ID}/export?format=share" \
             -H "Authorization: $TOKEN" \
@@ -111,12 +130,10 @@ jobs:
             head -c 800 /tmp/site.zip; echo
             exit 1
           fi
-          # 出错时服务端返回 JSON 而非 zip，挡一道
           head -c 2 /tmp/site.zip | grep -q 'PK' || { echo "::error::返回内容不是 zip"; head -c 800 /tmp/site.zip; exit 1; }
           ls -lh /tmp/site.zip
           mkdir -p "$OUT_DIR"
           unzip -q -o /tmp/site.zip -d "$OUT_DIR"
-          # 静态导出不产出 favicon / .nojekyll，这里补齐
           touch "$OUT_DIR/.nojekyll"
           [ -d site-assets ] && cp -r site-assets/. "$OUT_DIR"/ || true
           test -f "$OUT_DIR/index.html" || { echo "::error::导出结果无 index.html"; find "$OUT_DIR" -maxdepth 2 | head -40; exit 1; }
