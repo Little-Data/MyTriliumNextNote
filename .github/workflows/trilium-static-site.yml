@@ -30,6 +30,9 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      trilium_image: ${{ steps.params.outputs.image }}
+      root_note_id: ${{ steps.params.outputs.root_id }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -41,20 +44,23 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            # 手动触发：用 inputs，没填才 fallback
-            IMAGE="${{ inputs.image }}"
-            [ -z "$IMAGE" ] && IMAGE="triliumnext/trilium:v0.106.0"
-            ROOT_ID="${{ inputs.root_note_id }}"
-            [ -z "$ROOT_ID" ] && ROOT_ID="root"
+            # GitHub 会把 default 值自动填入 inputs，所以这里一定有值
+            echo "image=${{ inputs.image }}" >> "$GITHUB_OUTPUT"
+            echo "root_id=${{ inputs.root_note_id }}" >> "$GITHUB_OUTPUT"
           else
-            # push 触发：用固定默认值
-            IMAGE="triliumnext/trilium:v0.106.0"
-            ROOT_ID="root"
+            echo "image=triliumnext/trilium:v0.106.0" >> "$GITHUB_OUTPUT"
+            echo "root_id=1dMiMZa4sg4J" >> "$GITHUB_OUTPUT"
           fi
-          echo "TRILIUM_IMAGE=$IMAGE" >> "$GITHUB_ENV"
-          echo "ROOT_NOTE_ID=$ROOT_ID" >> "$GITHUB_ENV"
-          echo "→ TRILIUM_IMAGE=$IMAGE"
-          echo "→ ROOT_NOTE_ID=$ROOT_ID"
+
+      - name: 注入环境变量
+        run: |
+          echo "TRILIUM_IMAGE=${{ steps.params.outputs.image }}" >> "$GITHUB_ENV"
+          echo "ROOT_NOTE_ID=${{ steps.params.outputs.root_id }}" >> "$GITHUB_ENV"
+
+      - name: 调试确认
+        run: |
+          echo "→ TRILIUM_IMAGE=$TRILIUM_IMAGE"
+          echo "→ ROOT_NOTE_ID=$ROOT_NOTE_ID"
 
       - name: 校验输入
         env:
