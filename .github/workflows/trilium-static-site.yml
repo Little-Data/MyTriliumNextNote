@@ -1,0 +1,148 @@
+name: Trilium → Static Site
+
+# 触发：把 document.db 提交到仓库的 trilium-data/ 目录即可自动重建
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'trilium-data/document.db'
+      - 'site-assets/**'
+      - '.github/workflows/trilium-static-site.yml'
+  workflow_dispatch:
+    inputs:
+      root_note_id:
+        description: '导出根笔记 ID（root = 整棵树；也可填某个子树 noteId 只发布该分支）'
+        default: 'root'
+      image:
+        description: 'Trilium 服务端镜像，版本必须 >= 本地 Trilium 版本'
+        default: 'triliumnext/trilium:v0.106.0'
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: 'pages'
+  cancel-in-progress: false
+
+env:
+  TRILIUM_IMAGE: ${{ inputs.image || 'triliumnext/trilium:v0.106.0' }}
+  ROOT_NOTE_ID: ${{ inputs.root_note_id || 'root' }}
+  TRILIUM_PORT: '8080'
+  OUT_DIR: public
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          lfs: true # document.db 用 Git LFS 存时必须开启
+
+      - name: 校验输入
+        env:
+          TRILIUM_PASSWORD: ${{ secrets.TRILIUM_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [ -f trilium-data/document.db ] || { echo "::error::缺少 trilium-data/document.db"; exit 1; }
+          [ -n "$TRILIUM_PASSWORD" ] || { echo "::error::请配置 secrets中的TRILIUM_PASSWORD（Trilium 文档密码）；数据库未设密码时先在桌面端设置密码再重新上传"; exit 1; }
+          ls -lh trilium-data/document.db
+
+      - name: 准备数据目录
+        run: |
+          set -euo pipefail
+          DATA_DIR="$RUNNER_TEMP/trilium-data"
+          mkdir -p "$DATA_DIR"
+          cp trilium-data/document.db "$DATA_DIR/document.db"
+          # 容器内以 uid 1000(node) 运行，宿主目录必须对 other 可写，否则 migration 会失败
+          chmod -R 0777 "$DATA_DIR"
+          echo "DATA_DIR=$DATA_DIR" >> "$GITHUB_ENV"
+
+      - name: 启动 Trilium 服务端
+        run: |
+          set -euo pipefail
+          docker run -d --name trilium \
+            -p 8080:8080 \
+            -e TRILIUM_DATA_DIR=/home/node/trilium-data \
+            -e TRILIUM_PORT=8080 \
+            -e TRILIUM_NETWORK_HOST=0.0.0.0 \
+            -v "$DATA_DIR:/home/node/trilium-data" \
+            "$TRILIUM_IMAGE"
+          docker ps --filter name=trilium
+
+      - name: 等待服务就绪 + ETAPI 登录
+        env:
+          TRILIUM_PASSWORD: ${{ secrets.TRILIUM_PASSWORD }}
+        run: |
+          set -euo pipefail
+          url="http://127.0.0.1:${TRILIUM_PORT}"
+          for i in $(seq 1 90); do
+            code=$(curl -s -o /dev/null -m 3 -w '%{http_code}' "$url/" || true)
+            [ "$code" != "000" ] && { echo "[ready] http $code after $((i*3))s"; break; }
+            sleep 3
+          done
+          for i in $(seq 1 30); do
+            body=$(jq -n --arg p "$TRILIUM_PASSWORD" '{password:$p}')
+            code=$(curl -s -m 10 -X POST "$url/etapi/auth/login" \
+                    -H 'Content-Type: application/json' \
+                    -d "$body" -o /tmp/login.json -w '%{http_code}' || true)
+            [ "$code" = "201" ] && { echo "[auth] ok"; break; }
+            echo "[auth] $code, retry $i"; sleep 3
+          done
+          [ "$code" = "201" ] || { echo "::error::ETAPI 登录失败"; cat /tmp/login.json; exit 1; }
+          token=$(jq -r .authToken /tmp/login.json)
+          [ -n "$token" ] && [ "$token" != "null" ] || { echo "::error::未取到 authToken"; exit 1; }
+          echo "::add-mask::$token"
+          echo "TOKEN=$token" >> "$GITHUB_ENV"
+
+      - name: 导出静态站点（format=share）
+        run: |
+          set -euo pipefail
+          url="http://127.0.0.1:${TRILIUM_PORT}"
+          # v0.106.0 导出路由注册为 GET，用 POST 会直接 404
+          code=$(curl -sS -m 600 -X GET \
+            "$url/etapi/notes/${ROOT_NOTE_ID}/export?format=share" \
+            -H "Authorization: $TOKEN" \
+            -o /tmp/site.zip -w '%{http_code}' || true)
+          if [ "$code" != "200" ]; then
+            echo "::error::导出失败，HTTP $code"
+            head -c 800 /tmp/site.zip; echo
+            exit 1
+          fi
+          # 出错时服务端返回 JSON 而非 zip，挡一道
+          head -c 2 /tmp/site.zip | grep -q 'PK' || { echo "::error::返回内容不是 zip"; head -c 800 /tmp/site.zip; exit 1; }
+          ls -lh /tmp/site.zip
+          mkdir -p "$OUT_DIR"
+          unzip -q -o /tmp/site.zip -d "$OUT_DIR"
+          # 静态导出不产出 favicon / .nojekyll，这里补齐
+          touch "$OUT_DIR/.nojekyll"
+          [ -d site-assets ] && cp -r site-assets/. "$OUT_DIR"/ || true
+          test -f "$OUT_DIR/index.html" || { echo "::error::导出结果无 index.html"; find "$OUT_DIR" -maxdepth 2 | head -40; exit 1; }
+          echo "生成页面数: $(find "$OUT_DIR" -name '*.html' | wc -l)"
+
+      - name: 容器日志（排障用）
+        if: always()
+        run: |
+          docker logs trilium 2>&1 | tail -60 || true
+          docker rm -f trilium >/dev/null 2>&1 || true
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v6
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: public
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
