@@ -4,10 +4,7 @@ name: Trilium → Static Site
 on:
   push:
     branches: [main]
-    paths:
-      - 'trilium-data/document.db'
-      - 'site-assets/**'
-      - '.github/workflows/trilium-static-site.yml'
+
   workflow_dispatch:
     inputs:
       root_note_id:
